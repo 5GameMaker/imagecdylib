@@ -1,0 +1,10 @@
+[package]
+name = "imagecdylib"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+image = "0.25.2"

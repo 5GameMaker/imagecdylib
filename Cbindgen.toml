@@ -1,0 +1,10 @@
+include_version = true
+namespace = "libimage"
+cpp_compat = true
+
+tab_width = 4
+line_endings = "Native"
+
+[export]
+exclude = ["imagecdylib::ERROR"]
+prefix = "libimage_"
