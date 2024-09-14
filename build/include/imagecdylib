@@ -1,0 +1,196 @@
+#pragma once
+#include <cstdint>
+#include <memory>
+#ifndef IMAGECDYLIB_LIBIMAGE
+
+#include "imagecdylib.h"
+#include <string>
+
+namespace libimage {
+
+typedef libimage_image_metrics metrics;
+
+class read;
+template <typename T> class result;
+result<read> __contruct_read(libimage_read_wrap *);
+
+class resultv {
+public:
+    bool fine;
+    union {
+        int8_t unused;
+        std::string error;
+    };
+
+    ~resultv() {
+        if (!fine)
+            this->error.~basic_string();
+    }
+
+    static resultv ok() { return resultv(0); }
+    static resultv err() { return resultv(); }
+
+private:
+    resultv(int8_t value_) : fine(true), unused(value_) {}
+    resultv() : fine(false), error(std::string(libimage_get_err())) {}
+};
+
+template <typename T> class result {
+public:
+    bool fine;
+    union {
+        T value;
+        std::string error;
+    };
+
+    ~result() {
+        if (fine)
+            this->value.~T();
+        else
+            this->error.~basic_string();
+    }
+
+    static result<T> ok(T value) { return result<T>(value); }
+    static result<T> err() { return result<T>(); }
+
+private:
+    result(T value_) : fine(true), value(value_) {}
+    result() : fine(false), error(std::string(libimage_get_err())) {}
+};
+
+class write {
+public:
+    ~write() { libimage_destroy_w(this->_raw); }
+
+    static result<write> file(std::string &path) {
+        auto raw = libimage_open_file_w(path.c_str());
+        if (raw == NULL)
+            return result<write>::err();
+        else
+            return result<write>::ok(write(raw));
+    }
+
+    static result<write> buffer(char *buffer, size_t len) {
+        auto raw = libimage_open_buf_w(buffer, len);
+        if (raw == NULL)
+            return result<write>::err();
+        else
+            return result<write>::ok(write(raw));
+    }
+
+    static write expanding() { return write(libimage_open_expanding_w()); }
+
+    libimage_write_wrap *raw() { return this->_raw; }
+
+private:
+    write(libimage_write_wrap *raw) : _raw(raw) {}
+
+    libimage_write_wrap *_raw;
+};
+
+class dynamic_image {
+    friend class read;
+
+public:
+    ~dynamic_image() { libimage_destroy_image(this->_raw); }
+
+    static dynamic_image from_rgba8888(uint8_t *bytes, uint8_t width,
+                                       uint8_t height) {
+        return from_rgba8888((char *)bytes, width, height);
+    }
+    static dynamic_image from_rgba8888(char *bytes, uint8_t width,
+                                       uint8_t height) {
+        return dynamic_image(libimage_new_rgba8888(bytes, width, height));
+    }
+
+    libimage_dynamic_image *raw() { return this->_raw; }
+
+    libimage::metrics metrics() {
+        return libimage_metrics(this->raw()).metrics;
+    }
+
+    void to_rgba8888(uint8_t *dest) {
+        libimage_into_rgba8888(this->raw(), dest);
+    }
+    void to_rgba8888(int8_t *dest) { to_rgba8888((uint8_t *)dest); }
+
+    resultv write(libimage::write &to, uint8_t format) {
+        if (libimage_write(raw(), to.raw(), format))
+            return resultv::ok();
+        else
+            return resultv::err();
+    }
+
+private:
+    dynamic_image(libimage_dynamic_image *raw) : _raw(raw) {}
+
+    libimage_dynamic_image *_raw;
+};
+
+class read {
+public:
+    ~read() { libimage_destroy_r(this->_raw); }
+
+    static result<read> file(std::string &path) {
+        auto raw = libimage_open_file_r(path.c_str());
+        if (raw == NULL)
+            return result<read>::err();
+        else
+            return result<read>::ok(read(raw));
+    }
+
+    static result<read> buffer(unsigned char *buf, size_t len) {
+        return buffer((char *)buf, len);
+    }
+    static result<read> buffer(char *buf, size_t len) {
+        auto raw = libimage_open_buf_r(buf, len);
+        if (raw == NULL)
+            return result<read>::err();
+        else
+            return result<read>::ok(read(raw));
+    }
+
+    static result<read> from_write(write obj) {
+        auto raw = libimage_w_into_r(obj.raw());
+        if (raw == NULL)
+            return result<read>::err();
+        else
+            return result<read>::ok(read(raw));
+    }
+
+    libimage_read_wrap *raw() { return this->_raw; }
+
+    result<dynamic_image> image_guess_format() {
+        auto image = libimage_read_guess(this->raw());
+        if (image == NULL)
+            return result<dynamic_image>::err();
+        else
+            return result<dynamic_image>::ok(dynamic_image(image));
+    }
+
+    result<dynamic_image> image(int8_t format) {
+        auto image = libimage_read(this->raw(), format);
+        if (image == NULL)
+            return result<dynamic_image>::err();
+        else
+            return result<dynamic_image>::ok(image);
+    }
+
+    result<size_t> poll(char *buf, size_t max) {
+        libimage_reset_err();
+        auto len = libimage_poll(raw(), buf, max);
+        if (libimage_get_err() == NULL)
+            return result<size_t>::ok(len);
+        else
+            return result<size_t>::err();
+    }
+
+private:
+    read(libimage_read_wrap *raw) : _raw(raw) {}
+
+    libimage_read_wrap *_raw;
+};
+
+} // namespace libimage
+
+#endif

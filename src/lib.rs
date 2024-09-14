@@ -3,6 +3,7 @@ use std::{
     ffi::{CStr, CString},
     fs::File,
     io::{BufReader, Cursor, Read, Seek, Write},
+    mem::transmute,
     os::fd::{FromRawFd, RawFd},
     path::PathBuf,
     str::FromStr,
@@ -68,12 +69,14 @@ fn u8_to_format(format: u8) -> Option<ImageFormat> {
 pub enum ReadWrap {
     File(File),
     Buf(Cursor<&'static [u8]>),
+    Vec(Cursor<Vec<u8>>),
 }
 impl Read for ReadWrap {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Self::File(x) => x.read(buf),
             Self::Buf(x) => x.read(buf),
+            Self::Vec(x) => x.read(buf),
         }
     }
 }
@@ -82,6 +85,7 @@ impl Seek for ReadWrap {
         match self {
             Self::File(x) => x.seek(pos),
             Self::Buf(x) => x.seek(pos),
+            Self::Vec(x) => x.seek(pos),
         }
     }
 }
@@ -502,4 +506,113 @@ pub unsafe extern "C" fn libimage_write(
     }
 
     true
+}
+
+/// Create an image from raw RGBA8888 bytes.
+///
+/// ## Safety
+/// `bytes` must be at least or of size of `width * height * 4`.
+#[no_mangle]
+pub unsafe extern "C" fn libimage_new_rgba8888(
+    bytes: *const u8,
+    width: u32,
+    height: u32,
+) -> *mut DynamicImage {
+    let mut image = DynamicImage::new_rgba8(width, height);
+    image
+        .as_mut_rgba8()
+        .unwrap()
+        .copy_from_slice(std::slice::from_raw_parts(
+            bytes,
+            width as usize * height as usize * 4,
+        ));
+    Box::leak(Box::new(image)) as *mut DynamicImage
+}
+
+/// Convert a writer into a reader if it can be done trivially.
+///
+/// ## Safety
+/// `write` must point to a valid object.
+#[no_mangle]
+pub unsafe extern "C" fn libimage_w_into_r(write: *mut WriteWrap) -> *mut ReadWrap {
+    if write.is_null() {
+        set_err("'write' is null".to_string());
+        return std::ptr::null_mut();
+    };
+
+    match *Box::from_raw(write) {
+        WriteWrap::File(_) => {
+            set_err("Cannot cheaply convert files".into());
+            std::ptr::null_mut()
+        }
+        WriteWrap::Buf(mut x) => {
+            x.seek(std::io::SeekFrom::Start(0)).unwrap();
+            Box::leak(Box::new(ReadWrap::Buf(transmute::<
+                Cursor<&mut [u8]>,
+                Cursor<&[u8]>,
+            >(x)))) as *mut ReadWrap
+        }
+        WriteWrap::Expanding(mut x) => {
+            x.seek(std::io::SeekFrom::Start(0)).unwrap();
+            Box::leak(Box::new(ReadWrap::Vec(x))) as *mut ReadWrap
+        }
+    }
+}
+
+/// Pipe reader into a writer.
+///
+/// ## Safety
+/// `write` and `read` must point to valid objects.
+#[no_mangle]
+pub unsafe extern "C" fn libimage_pipe(write: *mut WriteWrap, read: *mut ReadWrap) -> bool {
+    let Some(write) = write.as_mut() else {
+        set_err("'write' is null".to_string());
+        return false;
+    };
+
+    let Some(read) = read.as_mut() else {
+        set_err("'read' is null".to_string());
+        return false;
+    };
+
+    let mut buf = vec![0; 8192];
+
+    loop {
+        let len = match read.read(&mut buf) {
+            Ok(x) => x,
+            Err(why) => {
+                set_err(why.to_string());
+                return false;
+            }
+        };
+
+        if len == 0 {
+            break true;
+        }
+
+        if let Err(why) = write.write_all(&buf) {
+            set_err(why.to_string());
+            break false;
+        }
+    }
+}
+
+/// Poll bytes from a reader. Returns 0 when done or error.
+///
+/// ## Safety
+/// `read` must point to a valid object. `buf` must not be null.
+#[no_mangle]
+pub unsafe extern "C" fn libimage_poll(read: *mut ReadWrap, buf: *mut u8, len: usize) -> usize {
+    let Some(read) = read.as_mut() else {
+        set_err("'read' is null".to_string());
+        return 0;
+    };
+
+    match read.read(std::slice::from_raw_parts_mut(buf, len)) {
+        Ok(x) => x,
+        Err(why) => {
+            set_err(why.to_string());
+            0
+        }
+    }
 }
